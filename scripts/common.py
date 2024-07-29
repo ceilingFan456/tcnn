@@ -26,6 +26,7 @@ import imageio
 import numpy as np
 import os
 import struct
+import cv2 
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
@@ -40,7 +41,11 @@ def write_image_imageio(img_file, img, quality):
 			img = img[:,:,:3]
 		kwargs["quality"] = quality
 		kwargs["subsampling"] = 0
-	imageio.imwrite(img_file, img, **kwargs)
+
+	if img.ndim == 3 and img.shape[2] == 1:
+		cv2.imwrite(img_file, img)
+	else:
+		imageio.imwrite(img_file, img, **kwargs)
 
 def read_image_imageio(img_file):
 	img = imageio.imread(img_file)

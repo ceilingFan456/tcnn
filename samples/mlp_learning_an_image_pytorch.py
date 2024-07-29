@@ -31,9 +31,12 @@ import argparse
 import commentjson as json
 import numpy as np
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = "2"
 import sys
 import torch
 import time
+
+from skimage.metrics import peak_signal_noise_ratio as psnr, structural_similarity as si
 
 try:
 	import tinycudann as tcnn
@@ -55,11 +58,12 @@ DATA_DIR = os.path.join(ROOT_DIR, "data")
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
 
 class Image(torch.nn.Module):
-	def __init__(self, filename, device):
+	def __init__(self, filename, device, scale):
 		super(Image, self).__init__()
 		self.data = read_image(filename)
 		self.shape = self.data.shape
 		self.data = torch.from_numpy(self.data).float().to(device)
+		self.scale = scale
 
 	def forward(self, xs):
 		with torch.no_grad():
@@ -69,12 +73,18 @@ class Image(torch.nn.Module):
 
 			xs = xs * torch.tensor([shape[1], shape[0]], device=xs.device).float()
 			indices = xs.long()
-			lerp_weights = xs - indices.float()
+
+			## downsample using scale
+			indices = indices - indices % self.scale
+
+			lerp_weights = (xs - indices.float()) / self.scale
 
 			x0 = indices[:, 0].clamp(min=0, max=shape[1]-1)
 			y0 = indices[:, 1].clamp(min=0, max=shape[0]-1)
-			x1 = (x0 + 1).clamp(max=shape[1]-1)
-			y1 = (y0 + 1).clamp(max=shape[0]-1)
+
+			## find next corner with correct scale.
+			x1 = (x0 + self.scale).clamp(max=shape[1]-1)
+			y1 = (y0 + self.scale).clamp(max=shape[0]-1)
 
 			return (
 				self.data[y0, x0] * (1.0 - lerp_weights[:,0:1]) * (1.0 - lerp_weights[:,1:2]) +
@@ -86,10 +96,11 @@ class Image(torch.nn.Module):
 def get_args():
 	parser = argparse.ArgumentParser(description="Image benchmark using PyTorch bindings.")
 
-	parser.add_argument("image", nargs="?", default="data/images/albert.jpg", help="Image to match")
-	parser.add_argument("config", nargs="?", default="data/config_hash.json", help="JSON config for tiny-cuda-nn")
-	parser.add_argument("n_steps", nargs="?", type=int, default=10000000, help="Number of training steps")
-	parser.add_argument("result_filename", nargs="?", default="", help="Number of training steps")
+	parser.add_argument("--scale", nargs="?", type=int, default=1, help="Scale factor for the image")
+	parser.add_argument("--image", nargs="?", default="data/images/albert.jpg", help="Image to match")
+	parser.add_argument("--config", nargs="?", default="data/config_hash.json", help="JSON config for tiny-cuda-nn")
+	parser.add_argument("--n_steps", nargs="?", type=int, default=10000000, help="Number of training steps")
+	parser.add_argument("--result_filename", nargs="?", default="", help="Number of training steps")
 
 	args = parser.parse_args()
 	return args
@@ -108,8 +119,9 @@ if __name__ == "__main__":
 	with open(args.config) as config_file:
 		config = json.load(config_file)
 
-	image = Image(args.image, device)
+	image = Image(args.image, device, args.scale)
 	n_channels = image.data.shape[2]
+	img = image.data.cpu().numpy()
 
 	model = tcnn.NetworkWithInputEncoding(n_input_dims=2, n_output_dims=n_channels, encoding_config=config["encoding"], network_config=config["network"]).to(device)
 	print(model)
@@ -149,13 +161,17 @@ if __name__ == "__main__":
 
 	print(f"Beginning optimization with {args.n_steps} training steps.")
 
-	try:
-		batch = torch.rand([batch_size, 2], device=device, dtype=torch.float32)
-		traced_image = torch.jit.trace(image, batch)
-	except:
-		# If tracing causes an error, fall back to regular execution
-		print(f"WARNING: PyTorch JIT trace failed. Performance will be slightly worse than regular.")
-		traced_image = image
+	## TODO
+	## add this one back for performance.
+	# try:
+	# 	batch = torch.rand([batch_size, 2], device=device, dtype=torch.float32)
+	# 	traced_image = torch.jit.trace(image, batch)
+	# except:
+	# 	# If tracing causes an error, fall back to regular execution
+	# 	print(f"WARNING: PyTorch JIT trace failed. Performance will be slightly worse than regular.")
+	# 	traced_image = image
+
+	traced_image = image
 
 	for i in range(args.n_steps):
 		batch = torch.rand([batch_size, 2], device=device, dtype=torch.float32)
@@ -175,10 +191,13 @@ if __name__ == "__main__":
 			elapsed_time = time.perf_counter() - prev_time
 			print(f"Step#{i}: loss={loss_val} time={int(elapsed_time*1000000)}[µs]")
 
-			path = f"{i}.jpg"
+			path = f"save/{i}.jpg"
 			print(f"Writing '{path}'... ", end="")
 			with torch.no_grad():
-				write_image(path, model(xy).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy())
+				pred = model(xy).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy()
+				write_image(path, pred)
+				# print(f"pred={pred.shape} img={img.shape}")
+				print(f"psnr={psnr(img, pred, data_range=1)} ssim={si(img, pred, channel_axis=-1)}")
 			print("done.")
 
 			# Ignore the time spent saving the image
