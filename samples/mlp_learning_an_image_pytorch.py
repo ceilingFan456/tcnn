@@ -120,6 +120,8 @@ if __name__ == "__main__":
 		config = json.load(config_file)
 
 	image = Image(args.image, device, args.scale)
+	print(f"Loaded image of shape {image.data.shape}.")
+	print(f"load file max = {image.data.max()} min = {image.data.min()}")
 	n_channels = image.data.shape[2]
 	img = image.data.cpu().numpy()
 

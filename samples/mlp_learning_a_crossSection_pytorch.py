@@ -103,6 +103,7 @@ class CrossSection(torch.nn.Module):
 		print(f"shape={self.shape}")
 		self.data = self.data.to(device)
 		self.scale = scale
+		print(f"self.scale={self.scale}")
 
 	## load file into 3D tensor
 	## TODO 
@@ -173,8 +174,10 @@ class CrossSection(torch.nn.Module):
 def write_3d_image(path, imgs):
     os.makedirs(path, exist_ok=True)
     for i, img in enumerate(imgs):
+        # print(f"img.max={img.max()} img.min={img.min()}")
+        img = np.squeeze(img, axis=-1)
         img = np.uint8(img * 255.)
-        print(f"img={img.shape}")
+        # print(f"img={img.shape}")
         PIL_Image.fromarray(img).save(os.path.join(path, str(i).zfill(3) + '.png'))
 
 
@@ -240,7 +243,8 @@ if __name__ == "__main__":
 
 	path = f"reference/"
 	print(f"Writing '{path}'... ", end="")
-	write_3d_image(path, cross_section(zyx).reshape(img_shape).detach().cpu().numpy())
+	gt = cross_section(zyx).reshape(img_shape).detach().cpu().numpy()
+	write_3d_image(path, gt)
 	print("done.")
 
 	prev_time = time.perf_counter()
@@ -252,18 +256,18 @@ if __name__ == "__main__":
 
 	## TODO
 	## add this one back for performance.
-	# try:
-	# 	batch = torch.rand([batch_size, 2], device=device, dtype=torch.float32)
-	# 	traced_image = torch.jit.trace(image, batch)
-	# except:
-	# 	# If tracing causes an error, fall back to regular execution
-	# 	print(f"WARNING: PyTorch JIT trace failed. Performance will be slightly worse than regular.")
-	# 	traced_image = image
+	try:
+		batch = torch.rand([batch_size, 3], device=device, dtype=torch.float32)
+		traced_image = torch.jit.trace(cross_section, batch)
+	except:
+		# If tracing causes an error, fall back to regular execution
+		print(f"WARNING: PyTorch JIT trace failed. Performance will be slightly worse than regular.")
+		traced_image = cross_section
 
-	traced_image = image
+	# traced_image = image
 
 	for i in range(args.n_steps):
-		batch = torch.rand([batch_size, 2], device=device, dtype=torch.float32)
+		batch = torch.rand([batch_size, 3], device=device, dtype=torch.float32)
 		targets = traced_image(batch)
 		output = model(batch)
 
@@ -280,13 +284,22 @@ if __name__ == "__main__":
 			elapsed_time = time.perf_counter() - prev_time
 			print(f"Step#{i}: loss={loss_val} time={int(elapsed_time*1000000)}[µs]")
 
-			path = f"save/{i}.jpg"
+			path = f"save/{i}"
 			print(f"Writing '{path}'... ", end="")
 			with torch.no_grad():
-				pred = model(xy).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy()
-				write_image(path, pred)
-				# print(f"pred={pred.shape} img={img.shape}")
-				print(f"psnr={psnr(img, pred, data_range=1)} ssim={si(img, pred, channel_axis=-1)}")
+				pred = model(zyx).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy()
+				write_3d_image(path, pred)
+				# print(f"pred={pred.shape} gt={gt.shape}")
+				# print(f"psnr={psnr(img, pred, data_range=1)} ssim={si(img, pred, channel_axis=-1)}")
+				## find average psnr and ssim
+				psnr_val = 0
+				ssim_val = 0
+				for i in range(pred.shape[0]):
+					psnr_val += psnr(gt[i], pred[i], data_range=1)
+					ssim_val += si(gt[i], pred[i], channel_axis=-1)
+				psnr_val /= pred.shape[0]
+				ssim_val /= pred.shape[0]
+				print(f"psnr={psnr_val} ssim={ssim_val}")
 			print("done.")
 
 			# Ignore the time spent saving the image
@@ -295,10 +308,10 @@ if __name__ == "__main__":
 			if i > 0 and interval < 1000:
 				interval *= 10
 
-	if args.result_filename:
-		print(f"Writing '{args.result_filename}'... ", end="")
-		with torch.no_grad():
-			write_image(args.result_filename, model(xy).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy())
-		print("done.")
+	# if args.result_filename:
+	# 	print(f"Writing '{args.result_filename}'... ", end="")
+	# 	with torch.no_grad():
+	# 		write_image(args.result_filename, model(xy).reshape(img_shape).clamp(0.0, 1.0).detach().cpu().numpy())
+	# 	print("done.")
 
 	tcnn.free_temporary_memory()
