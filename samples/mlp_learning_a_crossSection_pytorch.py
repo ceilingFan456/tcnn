@@ -36,6 +36,7 @@ import sys
 import torch
 import time
 import SimpleITK as sitk
+from PIL import Image as PIL_Image
 
 from skimage.metrics import peak_signal_noise_ratio as psnr, structural_similarity as si
 
@@ -96,7 +97,7 @@ class Image(torch.nn.Module):
 
 class CrossSection(torch.nn.Module):
 	def __init__(self, filename, device, scale):
-		super(Image, self).__init__()
+		super(CrossSection, self).__init__()
 		self.data = self.load_file(filename)
 		self.shape = self.data.shape
 		print(f"shape={self.shape}")
@@ -107,8 +108,23 @@ class CrossSection(torch.nn.Module):
 	## TODO 
 	## check if need to do normalization for each image to improve performance. 
 	def load_file(self, filename):
+		print(f"load_file={filename}")
 		data = sitk.GetArrayFromImage(sitk.ReadImage(filename)).astype(float)
-		data = torch.from_numpy(data).float()
+		data = torch.from_numpy(data).float()[... , :10] ## TODO out of memory because too many images
+		print(f"load_file_max={data.max()}")
+		print(f"load_file_min={data.min()}")
+		print(f"load_file={data.shape}")
+
+		## normalize data
+		data = data.permute(2, 1, 0)[..., None]
+		data_min = data.min()
+		data_max = data.max()
+		data = (data - data_min) / (data_max - data_min)
+
+		print(f"load_file_max={data.max()}")
+		print(f"load_file_min={data.min()}")
+		print(f"load_file={data.shape}")
+
 		return data
 
 	def forward(self, xs):
@@ -117,7 +133,7 @@ class CrossSection(torch.nn.Module):
 			# but less than ~20% of the overall runtime of this example.
 			shape = self.shape
 
-			xs = xs * torch.tensor([shape[2], shape[1], shape[0]], device=xs.device).float()
+			xs = xs * torch.tensor(shape[:3], device=xs.device).float()
 			indices = xs.long()
 
 			## downsample using scale
@@ -125,29 +141,48 @@ class CrossSection(torch.nn.Module):
 
 			lerp_weights = (xs - indices.float()) / self.scale
 
-			x0 = indices[:, 0].clamp(min=0, max=shape[1]-1)
-			y0 = indices[:, 1].clamp(min=0, max=shape[0]-1)
-			z0 = indices[:, 2].clamp(min=0, max=shape[2]-1)
+			x0 = indices[:, 2].clamp(min=0, max=shape[2]-1)
+			y0 = indices[:, 1].clamp(min=0, max=shape[1]-1)
+			z0 = indices[:, 0].clamp(min=0, max=shape[0]-1)
 
 			## find next corner with correct scale.
-			x1 = (x0 + self.scale).clamp(max=shape[1]-1)
-			y1 = (y0 + self.scale).clamp(max=shape[0]-1)
-			z1 = (z0 + self.scale).clamp(max=shape[2]-1)
+			x1 = (x0 + self.scale).clamp(max=shape[2]-1)
+			y1 = (y0 + self.scale).clamp(max=shape[1]-1)
+			z1 = (z0 + self.scale).clamp(max=shape[0]-1)
 
 			## TODO
 			## need to implement 3D bilinear interpolation
+			# return (
+			# 	self.data[y0, x0] * (1.0 - lerp_weights[:,0:1]) * (1.0 - lerp_weights[:,1:2]) +
+			# 	self.data[y0, x1] * lerp_weights[:,0:1] * (1.0 - lerp_weights[:,1:2]) +
+			# 	self.data[y1, x0] * (1.0 - lerp_weights[:,0:1]) * lerp_weights[:,1:2] +
+			# 	self.data[y1, x1] * lerp_weights[:,0:1] * lerp_weights[:,1:2]
+			# )
 			return (
-				self.data[y0, x0] * (1.0 - lerp_weights[:,0:1]) * (1.0 - lerp_weights[:,1:2]) +
-				self.data[y0, x1] * lerp_weights[:,0:1] * (1.0 - lerp_weights[:,1:2]) +
-				self.data[y1, x0] * (1.0 - lerp_weights[:,0:1]) * lerp_weights[:,1:2] +
-				self.data[y1, x1] * lerp_weights[:,0:1] * lerp_weights[:,1:2]
+				self.data[z0, y0, x0] * (1.0 - lerp_weights[:,0:1]) * (1.0 - lerp_weights[:,1:2]) * (1.0 - lerp_weights[:,2:3]) +
+				self.data[z0, y0, x1] * lerp_weights[:,0:1] * (1.0 - lerp_weights[:,1:2]) * (1.0 - lerp_weights[:,2:3]) +
+				self.data[z0, y1, x0] * (1.0 - lerp_weights[:,0:1]) * lerp_weights[:,1:2] * (1.0 - lerp_weights[:,2:3]) +
+				self.data[z0, y1, x1] * lerp_weights[:,0:1] * lerp_weights[:,1:2] * (1.0 - lerp_weights[:,2:3]) +
+				self.data[z1, y0, x0] * (1.0 - lerp_weights[:,0:1]) * (1.0 - lerp_weights[:,1:2]) * lerp_weights[:,2:3] +
+				self.data[z1, y0, x1] * lerp_weights[:,0:1] * (1.0 - lerp_weights[:,1:2]) * lerp_weights[:,2:3] +
+				self.data[z1, y1, x0] * (1.0 - lerp_weights[:,0:1]) * lerp_weights[:,1:2] * lerp_weights[:,2:3] +
+				self.data[z1, y1, x1] * lerp_weights[:,0:1] * lerp_weights[:,1:2] * lerp_weights[:,2:3]
 			)
+
+## takes in numpy array of images of 4D
+def write_3d_image(path, imgs):
+    os.makedirs(path, exist_ok=True)
+    for i, img in enumerate(imgs):
+        img = np.uint8(img * 255.)
+        print(f"img={img.shape}")
+        PIL_Image.fromarray(img).save(os.path.join(path, str(i).zfill(3) + '.png'))
+
 
 def get_args():
 	parser = argparse.ArgumentParser(description="Image benchmark using PyTorch bindings.")
 
 	parser.add_argument("--scale", nargs="?", type=int, default=1, help="Scale factor for the image")
-	parser.add_argument("--image", nargs="?", default="data/images/albert.jpg", help="Image to match")
+	parser.add_argument("--image", nargs="?", default="/home/simtech/Qiming/kits19/data/case_00150/case_00150.nii.gz", help="Image to match")
 	parser.add_argument("--config", nargs="?", default="data/config_hash.json", help="JSON config for tiny-cuda-nn")
 	parser.add_argument("--n_steps", nargs="?", type=int, default=10000000, help="Number of training steps")
 	parser.add_argument("--result_filename", nargs="?", default="", help="Number of training steps")
@@ -169,9 +204,9 @@ if __name__ == "__main__":
 	with open(args.config) as config_file:
 		config = json.load(config_file)
 
-	image = Image(args.image, device, args.scale)
-	n_channels = image.data.shape[2]
-	img = image.data.cpu().numpy()
+	cross_section = CrossSection(args.image, device, args.scale)
+	n_channels = cross_section.data.shape[3] ## assume cross section 3D data + gray scale
+	cs = cross_section.data.cpu().numpy()
 
 	model = tcnn.NetworkWithInputEncoding(n_input_dims=3, n_output_dims=n_channels, encoding_config=config["encoding"], network_config=config["network"]).to(device)
 	print(model)
@@ -187,21 +222,25 @@ if __name__ == "__main__":
 	optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 	# Variables for saving/displaying image results
-	resolution = image.data.shape[0:2]
-	img_shape = resolution + torch.Size([image.data.shape[2]])
-	n_pixels = resolution[0] * resolution[1]
+	resolution = cross_section.data.shape[0:3]
+	img_shape = cross_section.data.shape ## here is 4D
+	n_pixels = resolution[0] * resolution[1] * resolution[2]
 
-	half_dx =  0.5 / resolution[0]
+	half_dx =  0.5 / resolution[2]
 	half_dy =  0.5 / resolution[1]
-	xs = torch.linspace(half_dx, 1-half_dx, resolution[0], device=device)
+	half_dz =  0.5 / resolution[0]
+	xs = torch.linspace(half_dx, 1-half_dx, resolution[2], device=device)
 	ys = torch.linspace(half_dy, 1-half_dy, resolution[1], device=device)
-	xv, yv = torch.meshgrid([xs, ys])
+	zs = torch.linspace(half_dz, 1-half_dz, resolution[0], device=device)
+	zv, yv, xv = torch.meshgrid([zs, ys, xs])
 
-	xy = torch.stack((yv.flatten(), xv.flatten())).t()
+	zyx = torch.stack((zv.flatten(), yv.flatten(), xv.flatten()), dim=-1)
 
-	path = f"reference.jpg"
+	print(f"zyx={zyx.shape}")
+
+	path = f"reference/"
 	print(f"Writing '{path}'... ", end="")
-	write_image(path, image(xy).reshape(img_shape).detach().cpu().numpy())
+	write_3d_image(path, cross_section(zyx).reshape(img_shape).detach().cpu().numpy())
 	print("done.")
 
 	prev_time = time.perf_counter()
